@@ -2,6 +2,8 @@
 
 Pipeline CI/CD usando **ServiceNow DevOps** (integracao nativa) ao inves de API REST direta.
 
+**Instância ServiceNow**: `demoalectriallwfzu127848.service-now.com`
+
 ---
 
 ## Diferenca: API REST vs ServiceNow DevOps
