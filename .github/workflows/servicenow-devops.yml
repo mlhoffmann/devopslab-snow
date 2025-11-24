@@ -1,0 +1,92 @@
+# Pipeline CI/CD com ServiceNow DevOps (integracao nativa)
+# Usa as GitHub Actions oficiais da ServiceNow
+name: ServiceNow DevOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  SERVICENOW_INSTANCE: ${{ secrets.SERVICENOW_INSTANCE }}
+  SERVICENOW_DEVOPS_TOOL_ID: ${{ secrets.SERVICENOW_DEVOPS_TOOL_ID }}
+  SERVICENOW_DEVOPS_TOKEN: ${{ secrets.SERVICENOW_DEVOPS_TOKEN }}
+
+jobs:
+  # Job 1: Build e Testes
+  Build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Requirements
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        run: |
+          pytest test_streamlit.py -v
+
+      # ServiceNow DevOps - Registrar Build
+      - name: ServiceNow DevOps Build Registration
+        uses: ServiceNow/servicenow-devops-build@v3.1.0
+        with:
+          devops-integration-token: ${{ secrets.SERVICENOW_DEVOPS_TOKEN }}
+          instance-url: https://${{ secrets.SERVICENOW_INSTANCE }}
+          tool-id: ${{ secrets.SERVICENOW_DEVOPS_TOOL_ID }}
+          job-name: 'Build'
+
+  # Job 2: Criar Change Request via ServiceNow DevOps
+  Change_Request:
+    needs: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      # ServiceNow DevOps - Criar Change Request
+      - name: ServiceNow DevOps Change Request
+        uses: ServiceNow/servicenow-devops-change@v3.1.0
+        with:
+          devops-integration-token: ${{ secrets.SERVICENOW_DEVOPS_TOKEN }}
+          instance-url: https://${{ secrets.SERVICENOW_INSTANCE }}
+          tool-id: ${{ secrets.SERVICENOW_DEVOPS_TOOL_ID }}
+          job-name: 'Change_Request'
+          change-request: '{"short_description":"Deploy via ServiceNow DevOps","type":"standard","priority":"3"}'
+          # Opcoes de aprovacao:
+          # changeCreationTimeOut: tempo max para criar CR (segundos)
+          # abortOnChangeCreationFailure: abortar se falhar
+          # abortOnChangeStepTimeout: abortar se timeout na aprovacao
+
+  # Job 3: Deploy (executa apos aprovacao automatica via DevOps)
+  Deploy:
+    needs: Change_Request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Deploy to Streamlit Cloud
+        run: |
+          echo "Deploying to Streamlit Cloud..."
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+
+      - name: Deployment Summary
+        run: |
+          echo "========================================"
+          echo "DEPLOY CONCLUIDO VIA SERVICENOW DEVOPS"
+          echo "========================================"
