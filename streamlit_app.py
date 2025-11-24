@@ -40,3 +40,4 @@ Este projeto demonstra um pipeline CI/CD completo com:
 # Footer
 st.markdown("---")
 st.caption("DevOps Lab - Desenvolvido com Streamlit | Petrobras CI/CD")
+v4.0 - Demo ServiceNow DevOps
