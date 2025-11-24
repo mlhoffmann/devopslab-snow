@@ -1,0 +1,97 @@
+# Pipeline gerenciado pelo ServiceNow DevOps
+# O ServiceNow intercepta e cria CR automaticamente
+name: ServiceNow DevOps Managed Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # Job 1: Build e Testes
+  Build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Tests
+        run: |
+          pytest test_streamlit.py -v
+
+      - name: Build Success
+        run: |
+          echo "════════════════════════════════════════"
+          echo "✅ BUILD COMPLETED SUCCESSFULLY"
+          echo "════════════════════════════════════════"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Repository: ${{ github.repository }}"
+
+  # Job 2: Change_Request - ServiceNow DevOps deve interceptar aqui
+  Change_Request:
+    needs: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Request Change Approval
+        run: |
+          echo "════════════════════════════════════════"
+          echo "📋 CHANGE REQUEST STAGE"
+          echo "════════════════════════════════════════"
+          echo "⏳ Aguardando ServiceNow DevOps criar Change Request..."
+          echo ""
+          echo "Pipeline: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Commit: ${{ github.sha }}"
+          echo ""
+          echo "ServiceNow DevOps deve interceptar este stage e:"
+          echo "1. Criar uma Change Request automaticamente"
+          echo "2. Pausar a execução do workflow"
+          echo "3. Aguardar aprovação do Change Management"
+          echo "4. Liberar o próximo stage após aprovação"
+          echo ""
+          echo "Se você está vendo esta mensagem, o ServiceNow ainda não interceptou."
+
+      - name: Wait for ServiceNow DevOps
+        run: |
+          echo "Waiting for ServiceNow DevOps to manage this stage..."
+          sleep 10
+
+  # Job 3: Deploy - só executa após aprovação via ServiceNow DevOps
+  Deploy:
+    needs: Change_Request
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Deploy Application
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🚀 DEPLOYMENT STARTED"
+          echo "════════════════════════════════════════"
+          echo "Deploying to Streamlit Cloud..."
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+
+      - name: Deployment Success
+        run: |
+          echo "════════════════════════════════════════"
+          echo "✅ DEPLOYMENT COMPLETED SUCCESSFULLY"
+          echo "════════════════════════════════════════"
+          echo "Pipeline: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
