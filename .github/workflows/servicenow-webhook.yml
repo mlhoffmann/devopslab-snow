@@ -1,0 +1,232 @@
+# Pipeline CI/CD com ServiceNow via Webhook
+# Notifica o ServiceNow sobre eventos do pipeline
+name: ServiceNow Webhook Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  SERVICENOW_INSTANCE: ${{ secrets.SERVICENOW_INSTANCE }}
+  SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
+  SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
+
+jobs:
+  # Job 1: Build e Testes
+  Build:
+    runs-on: ubuntu-latest
+    outputs:
+      build_status: ${{ steps.tests.outcome }}
+      commit_sha: ${{ github.sha }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Requirements
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        id: tests
+        run: |
+          pytest test_streamlit.py -v
+
+      - name: Notify ServiceNow - Build Started
+        run: |
+          curl -X POST \
+            "https://${SERVICENOW_INSTANCE}/api/now/table/sys_event" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}" \
+            -d '{
+              "event_name": "github.build.started",
+              "queue": "default",
+              "parm1": "${{ github.repository }}",
+              "parm2": "${{ github.sha }}",
+              "parm3": "Build iniciado",
+              "source": "GitHub Actions"
+            }'
+
+      - name: Notify ServiceNow - Build Complete
+        if: always()
+        run: |
+          STATUS="${{ steps.tests.outcome }}"
+          curl -X POST \
+            "https://${SERVICENOW_INSTANCE}/api/now/table/sys_event" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}" \
+            -d "{
+              \"event_name\": \"github.build.complete\",
+              \"queue\": \"default\",
+              \"parm1\": \"${{ github.repository }}\",
+              \"parm2\": \"${{ github.sha }}\",
+              \"parm3\": \"Build ${STATUS}\",
+              \"source\": \"GitHub Actions\"
+            }"
+
+  # Job 2: Criar Change Request
+  Create_Change:
+    needs: Build
+    runs-on: ubuntu-latest
+    if: needs.Build.outputs.build_status == 'success'
+    outputs:
+      change_number: ${{ steps.create_cr.outputs.cr_number }}
+      change_sys_id: ${{ steps.create_cr.outputs.cr_sys_id }}
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Get Commit Info
+        id: commit_info
+        run: |
+          echo "commit_message=$(git log -1 --pretty=%s | head -c 100)" >> $GITHUB_OUTPUT
+          echo "commit_author=$(git log -1 --pretty=%an)" >> $GITHUB_OUTPUT
+          echo "commit_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Create Change Request
+        id: create_cr
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            "https://${SERVICENOW_INSTANCE}/api/now/table/change_request" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}" \
+            -d '{
+              "short_description": "Deploy Streamlit - Commit ${{ steps.commit_info.outputs.commit_sha }}",
+              "description": "Deploy via GitHub Actions (Webhook Integration)\n\nCommit: ${{ steps.commit_info.outputs.commit_message }}\nAutor: ${{ steps.commit_info.outputs.commit_author }}\nRepositorio: ${{ github.repository }}\nBranch: ${{ github.ref_name }}",
+              "type": "standard",
+              "priority": "3",
+              "risk": "3",
+              "impact": "3",
+              "state": "-3"
+            }')
+
+          CR_NUMBER=$(echo $RESPONSE | jq -r '.result.number')
+          CR_SYS_ID=$(echo $RESPONSE | jq -r '.result.sys_id')
+
+          echo "cr_number=$CR_NUMBER" >> $GITHUB_OUTPUT
+          echo "cr_sys_id=$CR_SYS_ID" >> $GITHUB_OUTPUT
+
+          echo "════════════════════════════════════════"
+          echo "✅ Change Request criado: $CR_NUMBER"
+          echo "📝 sys_id: $CR_SYS_ID"
+          echo "🔗 GitHub Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "════════════════════════════════════════"
+
+      - name: Add Work Notes
+        run: |
+          curl -X PATCH \
+            "https://${SERVICENOW_INSTANCE}/api/now/table/change_request/${{ steps.create_cr.outputs.cr_sys_id }}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}" \
+            -d "{
+              \"work_notes\": \"Pipeline Status:\n- ✅ Build: Success\n- ✅ Tests: Passed\n\n⏳ CR em estado AUTHORIZE\n📋 Aprove esta CR para liberar o deploy!\n\n🔗 GitHub Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }"
+
+  # Job 3: Wait for Approval
+  Wait_Approval:
+    needs: Create_Change
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Poll ServiceNow for Approval
+        run: |
+          echo "════════════════════════════════════════"
+          echo "⏳ AGUARDANDO APROVACAO NO SERVICENOW"
+          echo "════════════════════════════════════════"
+          echo "📝 Change Request: ${{ needs.Create_Change.outputs.change_number }}"
+          echo "🔗 ServiceNow: https://${SERVICENOW_INSTANCE}/nav_to.do?uri=change_request.do?sys_id=${{ needs.Create_Change.outputs.change_sys_id }}"
+          echo ""
+
+          CR_SYS_ID="${{ needs.Create_Change.outputs.change_sys_id }}"
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            RESPONSE=$(curl -s -X GET \
+              "https://${SERVICENOW_INSTANCE}/api/now/table/change_request/${CR_SYS_ID}?sysparm_fields=state,number" \
+              -H "Accept: application/json" \
+              -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}")
+
+            STATE=$(echo $RESPONSE | jq -r '.result.state')
+
+            echo "[$ATTEMPT/$MAX_ATTEMPTS] Estado: $STATE"
+
+            # -1 = Scheduled, -2 = Implement (aprovado)
+            if [ "$STATE" == "-1" ] || [ "$STATE" == "-2" ]; then
+              echo ""
+              echo "════════════════════════════════════════"
+              echo "✅ CHANGE REQUEST APROVADA!"
+              echo "════════════════════════════════════════"
+              exit 0
+            fi
+
+            # 4 = Canceled, 3 = Closed
+            if [ "$STATE" == "4" ] || [ "$STATE" == "3" ]; then
+              echo ""
+              echo "❌ Change Request cancelada/fechada!"
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          echo "⏰ TIMEOUT! CR nao foi aprovada em 30 minutos."
+          exit 1
+
+  # Job 4: Deploy
+  Deploy:
+    needs: [Create_Change, Wait_Approval]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Deploy Application
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🚀 DEPLOY EM ANDAMENTO"
+          echo "════════════════════════════════════════"
+          echo "📝 CR: ${{ needs.Create_Change.outputs.change_number }}"
+          echo "💾 Commit: ${{ github.sha }}"
+          echo "🌿 Branch: ${{ github.ref_name }}"
+          echo ""
+          echo "✅ Deploy simulado com sucesso!"
+
+      - name: Update Change Request - Deploy Complete
+        run: |
+          curl -X PATCH \
+            "https://${SERVICENOW_INSTANCE}/api/now/table/change_request/${{ needs.Create_Change.outputs.change_sys_id }}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -u "${SERVICENOW_USERNAME}:${SERVICENOW_PASSWORD}" \
+            -d "{
+              \"state\": \"0\",
+              \"work_notes\": \"✅ Deploy concluido com sucesso!\n⏰ $(date -u +\"%Y-%m-%d %H:%M:%S UTC\")\n\n🔗 GitHub Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }"
+
+      - name: Deployment Summary
+        run: |
+          echo "════════════════════════════════════════"
+          echo "✅ DEPLOY CONCLUIDO COM SUCESSO"
+          echo "════════════════════════════════════════"
+          echo "📝 CR: ${{ needs.Create_Change.outputs.change_number }}"
+          echo "🔗 ServiceNow: https://${SERVICENOW_INSTANCE}/nav_to.do?uri=change_request.do?sys_id=${{ needs.Create_Change.outputs.change_sys_id }}"
